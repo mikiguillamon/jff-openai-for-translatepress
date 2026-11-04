@@ -133,6 +133,8 @@ assert_test(invoke_private('crawl_response_issue', $response, 'discover') === 'c
 $response['headers']['x-litespeed-cache'] = 'hit';
 assert_test(invoke_private('crawl_response_issue', $response, 'discover') === 'cached_page',
     'Cached page is not silently treated as discovered');
+assert_test(invoke_private('crawl_response_issue', $response, 'warm') === null,
+    'Cached page is normal during warming of translated content');
 assert_test(invoke_private('crawl_response_issue', ['status'=>404, 'headers'=>[]], 'discover') === 'http_404',
     'One unavailable URL may be skipped without failing whole job');
 assert_test(invoke_private('crawl_response_issue', ['status'=>200, 'headers'=>['content-type'=>'application/pdf']], 'discover') === 'non_html_response',
@@ -150,6 +152,6 @@ $page_issue_method->invokeArgs(null, [&$bad_page_job, 'es_ES',
     'https://example.test/catalog/?jff_trp_signature=secret', 'capture_not_confirmed']);
 assert_test($bad_page_job['urls_skipped'] === 1 &&
     $bad_page_job['page_issues'][0]['path'] === '/catalog/' &&
-    !str_contains(json_encode($bad_page_job), 'secret'),
+    strpos(json_encode($bad_page_job), 'secret') === false,
     'Skipped page is recorded without private URL query parameters');
 echo "All manager smoke tests passed.\n";
