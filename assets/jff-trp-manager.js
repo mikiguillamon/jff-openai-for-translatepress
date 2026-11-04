@@ -40,12 +40,16 @@
         'Saved unchanged: ' + (job.strings_unchanged || 0),
         'Skipped: ' + (job.strings_skipped || 0),
         'Errors: ' + (job.failed || 0),
+        'Temporary retries: ' + (job.transient_retries || 0),
         'Needs review: ' + (job.review_items || []).length
       ];
       if (job.observed_strings_by_language) {
         for (const [language, count] of Object.entries(job.observed_strings_by_language)) {
           lines.push('Strings observed on public pages (' + language + '): ' + count);
         }
+      }
+      for (const incident of (job.transient_history || []).slice(-3)) {
+        lines.push('Temporary issue (' + incident.language + ', attempt ' + incident.attempt + '): ' + incident.reason);
       }
       if (job.next_attempt && job.status === 'waiting')
         lines.push('Next attempt: ' + new Date(job.next_attempt * 1000).toLocaleString());
