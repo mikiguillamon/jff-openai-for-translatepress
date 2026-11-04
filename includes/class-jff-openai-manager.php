@@ -728,7 +728,8 @@ final class JFF_TRP_Manager {
             strpos($type, 'application/xhtml+xml') === false) {
             return 'non_html_response';
         }
-        if (strtolower(trim((string) wp_remote_retrieve_header($response, 'x-litespeed-cache'))) === 'hit') {
+        if ($phase === 'discover' &&
+            strtolower(trim((string) wp_remote_retrieve_header($response, 'x-litespeed-cache'))) === 'hit') {
             return 'cached_page';
         }
         if ($phase === 'discover' &&
