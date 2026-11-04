@@ -121,10 +121,14 @@ final class JFF_TRP_Manager {
                 array_push($values, $job['id'], $lang, md5($value));
             }
         }
-        if ($placeholders) {
+        // Avoid oversized prepared SQL statements on pages with many fragments.
+        $total = count($placeholders);
+        for ($offset = 0; $offset < $total; $offset += 200) {
+            $part = array_slice($placeholders, $offset, 200);
+            $args = array_slice($values, $offset * 3, count($part) * 3);
             $sql = "INSERT IGNORE INTO {$seen} (job_id, language, original_hash) VALUES " .
-                implode(', ', $placeholders);
-            if ($wpdb->query($wpdb->prepare($sql, $values)) === false) {
+                implode(', ', $part);
+            if ($wpdb->query($wpdb->prepare($sql, $args)) === false) {
                 throw new RuntimeException('Failed to capture observed page strings.');
             }
         }
