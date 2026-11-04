@@ -42,6 +42,7 @@ function wp_unslash($value) { return $value; }
 function sanitize_text_field($value) { return trim((string) $value); }
 function sanitize_textarea_field($value) { return trim((string) $value); }
 function get_option($key, $fallback = null) { return $GLOBALS['mock_options'][$key] ?? $fallback; }
+function update_option($key, $value, $autoload = null) { $GLOBALS['mock_options'][$key] = $value; return true; }
 function is_wp_error($x) { return $x instanceof WP_Error; }
 function wp_json_encode($value, $options = 0) { return json_encode($value, $options); }
 function wp_remote_post($url, $args) {
@@ -110,6 +111,7 @@ $translated = $engine->translate_array([
 ], 'es_ES', 'en_US');
 assert_true($translated === ['node-7' => 'Hola <strong>mundo</strong>!', 'node-18' => 'Hola {name}!'], 'Translations preserve original associative keys and markup');
 assert_true($engine->logger_calls() === 1, 'Quota only counts validated translation batches');
+assert_true($GLOBALS['mock_options']['jff_openai_translation_activity']['status'] === 'success', 'Frontend translation success recorded without content');
 $last = $GLOBALS['mock_last_request'];
 $payload = json_decode($last['args']['body'], true);
 assert_true($last['url'] === 'https://api.openai.com/v1/responses', 'Uses official Responses API endpoint');
@@ -128,6 +130,7 @@ $before = $engine->logger_calls();
 $GLOBALS['mock_http'][] = mock_response(['Hola <strong>mundo</em>!']);
 $out = $engine->translate_array(['node-x' => 'Hello <strong>world</strong>!'], 'es_ES', 'en_US');
 assert_true($out === [] && $engine->logger_calls() === $before, 'Malformed HTML is not stored or counted');
+assert_true($GLOBALS['mock_options']['jff_openai_translation_activity']['code'] === 'jff_openai_unsafe_translation', 'Invalid response has a safe visible diagnostic code');
 
 $incomplete = $engine->parse_response(mock_response(['Hola'], 'incomplete'), ['Hello']);
 assert_true(is_wp_error($incomplete) && $incomplete->get_error_code() === 'jff_openai_incomplete_response', 'Incomplete responses are rejected');
@@ -142,6 +145,16 @@ $future_engine->translate_array(['Hello'], 'es_ES', 'en_US');
 $future_payload = json_decode($GLOBALS['mock_last_request']['args']['body'], true);
 assert_true($future_payload['model'] === 'gpt-7-future', 'Future custom model IDs work without code changes');
 assert_true($future_payload['reasoning']['effort'] === 'none', 'Explicit reasoning effort is serialized correctly');
+
+$GLOBALS['mock_http'][] = mock_response(['Hola <strong>mundo</em>!', 'Adios']);
+$GLOBALS['mock_http'][] = mock_response(['Hola <strong>mundo</strong>!']);
+$GLOBALS['mock_http'][] = mock_response(['Adios']);
+$fallback = $engine->translate_array(['x' => 'Hello <strong>world</strong>!', 'y' => 'Goodbye'], 'es_ES', 'en_US');
+assert_true($fallback === ['x' => 'Hola <strong>mundo</strong>!', 'y' => 'Adios'], 'Bad batch falls back to safe per-item translation');
+
+$GLOBALS['mock_http'][] = mock_response(['Hola <em>mundo</em>!']);
+$test = $engine->test_request();
+assert_true(is_wp_error($test) && $test->get_error_code() === 'jff_openai_unsafe_translation', 'API credential test rejects malformed translated text even with HTTP 200');
 
 JFF_TranslatePress_OpenAI::boot();
 assert_true(isset($GLOBALS['mock_hooks']['trp_machine_translation_engines']), 'Registers TranslatePress engine hook');
