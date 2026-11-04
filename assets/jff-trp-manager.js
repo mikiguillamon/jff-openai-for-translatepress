@@ -41,6 +41,11 @@
         'Errors: ' + (job.failed || 0),
         'Needs review: ' + (job.review_items || []).length
       ];
+      if (job.observed_strings_by_language) {
+        for (const [language, count] of Object.entries(job.observed_strings_by_language)) {
+          lines.push('Strings observed on public pages (' + language + '): ' + count);
+        }
+      }
       if (job.next_attempt && job.status === 'waiting')
         lines.push('Next attempt: ' + new Date(job.next_attempt * 1000).toLocaleString());
       if (job.scope_mode !== 'rendered_urls_v1') {
