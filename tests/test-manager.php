@@ -43,6 +43,8 @@ assert_test(invoke_private('languages') === ['es_ES', 'ca', 'de_DE', 'fr_FR'],
     'Reset actions exclude the default language');
 assert_test(JFF_TRP_Manager::STRINGS_PER_TICK === 8 &&
     JFF_TRP_Manager::BATCH_SIZE === 4, 'Bulk translation uses bounded independent jobs');
+assert_test(invoke_private('is_scoped_job', ['scope_mode'=>'rendered_urls_v1']), 'Current jobs use discovered-page scope');
+assert_test(!invoke_private('is_scoped_job', ['phase'=>'dictionary']), 'Previous unscoped jobs must not resume');
 $urls = invoke_private('collect_urls', "https://example.test/contact/\nhttps://evil.test/private");
 assert_test($urls === [
     'https://example.test/',
@@ -101,4 +103,23 @@ assert_test($no_http['status']==='waiting' && $no_http['db_cursor']===148,'Silen
 $no_http['status']='running';
 $retry_method->invokeArgs(null, [&$no_http,'es_ES',['id'=>149,'original'=>'Unusual data'],[],[],['status'=>0,'translated'=>'']]);
 assert_test($no_http['db_cursor']===149 && $no_http['status']==='running' && $no_http['review_items'][0]['reason']==='translatepress_no_api_call','Repeated silent skip continues and reports accurate reason');
+class MockSeenDatabase {
+    public $prefix = 'wp_';
+    public $insert = '';
+    public function prepare($query, $params) { return $query . ' /* ' . count($params) . ' params */'; }
+    public function query($query) { $this->insert = $query; return 1; }
+}
+$wpdb = new MockSeenDatabase();
+$GLOBALS['settings']['jff_trp_bulk_job'] = [
+  'id'=>'job-uuid', 'scope_mode'=>'rendered_urls_v1',
+  'status'=>'running', 'phase'=>'discover', 'languages'=>['es_ES']
+];
+$original_dictionary = ['Some example'=> (object) ['translated'=>'Example']];
+$received = JFF_TRP_Manager::capture_rendered_strings($original_dictionary, '', ['Some example'], 'es_ES');
+assert_test($received === $original_dictionary, 'String capture never modifies TranslatePress results');
+assert_test(strpos($wpdb->insert, 'INSERT IGNORE') !== false && strpos($wpdb->insert, 'jff_trp_bulk_seen') !== false, 'Observed strings enter scoped hash queue');
+$GLOBALS['settings']['jff_trp_bulk_job']['phase'] = 'warm';
+$wpdb->insert = '';
+JFF_TRP_Manager::capture_rendered_strings($original_dictionary, '', ['Some example'], 'es_ES');
+assert_test($wpdb->insert === '', 'Warm passes do not add unobserved strings to discovery queue');
 echo "All manager smoke tests passed.\n";

@@ -1,0 +1,22 @@
+name: PHP plugin checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+      - name: Syntax check PHP
+        run: |
+          find . -name '*.php' -type f -print0 | xargs -0 -n1 php -l
+      - name: Engine regression tests
+        run: php tests/test-engine.php
+      - name: Translation manager regression tests
+        run: php tests/test-manager.php

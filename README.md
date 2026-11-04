@@ -2,7 +2,7 @@
 
 A small standalone WordPress plugin that adds **one translation engine** to TranslatePress: OpenAI via the **Responses API**. This is not a fork of TranslatePress and does not replace its interface, language switcher, translation database, or visual translation editor.
 
-## Translation Manager (0.2.0-beta.1)
+## Translation Manager (0.2.0-beta.4)
 
 Open **Settings → OpenAI TranslatePress** after activating the plugin. The manager is separate from TranslatePress's own automatic-translation settings.
 
@@ -16,7 +16,7 @@ Open **Settings → OpenAI TranslatePress** after activating the plugin. The man
 ### Translate the website or one language
 
 - Select **Translate entire website** or a target language. The manager discovers the homepage, published public posts/pages, relevant public archive pages and optional same-site URLs. It requests the localized URLs without requiring you to visit them manually.
-- It then processes eligible pending dictionary strings in independent background requests with a maximum of eight strings (in two API groups of four) per request. Existing translated strings and manual translations are not overwritten.
+- During signed discovery, the manager records hashes of strings actually encountered on the current public pages. It then processes **only those observed strings** that remain pending. It no longer scans every historical/unrelated pending dictionary entry. Each background request processes at most eight strings (in two groups of four). Existing translated strings and manual translations are not overwritten.
 - **Pause, Resume, Stop** controls and a progress/status panel are available. It waits until the next day if the TranslatePress daily character limit would be exceeded.
 - WP-Cron and non-blocking loopback requests drive the job. Where hosting disables either, use a server cron or the WP-CLI command \`wp jff-trp tick\`, with \`--path\` set to your WordPress directory.
 - A final page pass warms content; the manager purges LiteSpeed's page cache on successful completion when that integration is active.
@@ -121,6 +121,13 @@ The activity record stores a timestamp, status, sanitized error code, and source
 **Important:** TranslatePress's own API credentials test page may display the API key. Never share screenshots of that page. Prefer the plugin's full translation test.
 
 ## Changelog
+
+### 0.2.0-beta.4
+- Scope bulk translation to strings actually observed while crawling the selected public URLs, stored as per-job hashes instead of source text.
+- Fail safely if a crawler response does not confirm that string capture was active.
+- Require a fresh job after updating from an older beta; existing translations are preserved. The user must Stop the previous job before starting a new one.
+- Keep identical-to-original counts distinct from changed translations.
+
 
 ### 0.2.0-beta.3
 - Skip URI-like technical references such as tel: and mailto: before contacting OpenAI.
