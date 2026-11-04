@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OpenAI for TranslatePress (JFF)
  * Description: Adds an independent OpenAI Responses API translation engine to TranslatePress. Use your own API key and model ID.
- * Version: 0.1.2
+ * Version: 0.2.0-beta.1
  * Author: Just For Fun
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -17,11 +17,13 @@ if (!defined('ABSPATH')) {
 
 final class JFF_TranslatePress_OpenAI {
     const ENGINE = 'jff_openai_responses';
-    const VERSION = '0.1.2';
+    const VERSION = '0.2.0-beta.1';
     const PREFIX = 'jff_openai_';
 
     public static function boot() {
         add_action('admin_notices', [__CLASS__, 'dependency_notice']);
+        require_once __DIR__ . '/includes/class-jff-openai-manager.php';
+        JFF_TRP_Manager::boot();
         add_action('admin_post_jff_openai_translation_test', [__CLASS__, 'run_translation_test']);
         add_filter('trp_machine_translation_engines', [__CLASS__, 'register_engine'], 20);
         add_filter('trp_automatic_translation_engines_classes', [__CLASS__, 'register_engine_class'], 20);
