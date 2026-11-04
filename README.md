@@ -2,6 +2,29 @@
 
 A small standalone WordPress plugin that adds **one translation engine** to TranslatePress: OpenAI via the **Responses API**. This is not a fork of TranslatePress and does not replace its interface, language switcher, translation database, or visual translation editor.
 
+## Translation Manager (0.2.0-beta.1)
+
+Open **Settings → OpenAI TranslatePress** after activating the plugin. The manager is separate from TranslatePress's own automatic-translation settings.
+
+### Reset a language or all languages
+
+- Use **Reset es_ES / ca / de_DE / fr_FR** to clear that target language's stored regular dictionary and gettext translations, including manual edits. **Reset all languages** performs this for every target language. The original content and WordPress posts are preserved.
+- A restorable database backup and an exact typed confirmation are required. Reset does not run automatically on activation or plugin update.
+- URL slugs are **preserved by default**. An optional slug reset is offered only if the plugin recognizes a compatible language-scoped table schema. Removing translated slugs can break links and indexing.
+- Resetting translations is irreversible without restoring a backup. Validate carefully in staging first.
+
+### Translate the website or one language
+
+- Select **Translate entire website** or a target language. The manager discovers the homepage, published public posts/pages, relevant public archive pages and optional same-site URLs. It requests the localized URLs without requiring you to visit them manually.
+- It then processes eligible pending dictionary strings in independent background requests with a maximum of eight strings (in two API groups of four) per request. Existing translated strings and manual translations are not overwritten.
+- **Pause, Resume, Stop** controls and a progress/status panel are available. It waits until the next day if the TranslatePress daily character limit would be exceeded.
+- WP-Cron and non-blocking loopback requests drive the job. Where hosting disables either, use a server cron or the WP-CLI command \`wp jff-trp tick\`, with \`--path\` set to your WordPress directory.
+- A final page pass warms content; the manager purges LiteSpeed's page cache on successful completion when that integration is active.
+
+This is a **beta** feature: test in staging before resetting any live language or running a large paid OpenAI translation job. Background processing depends on working WordPress loopbacks, TranslatePress's current database schema, and WP-Cron. JavaScript-only, private or unusual dynamically generated content may not be included. Gettext translations and SEO slugs have separate storage and are not guaranteed to be covered by bulk dictionary translation; manually verify these where relevant.
+
+Run isolated automated checks with \`php tests/test-engine.php\` and \`php tests/test-manager.php\`.
+
 ## What it does
 
 - Adds **OpenAI (own API key - JFF)** to TranslatePress > Automatic Translation.
