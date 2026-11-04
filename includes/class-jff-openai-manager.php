@@ -16,6 +16,7 @@ final class JFF_TRP_Manager {
     const PAGE_SLUG = 'jff-trp-manager';
     const BATCH_SIZE = 4;
     const STRINGS_PER_TICK = 8;
+    const MAX_PAGE_ISSUES = 50;
     const SCOPE_MODE = 'rendered_urls_v1';
     const MAX_STRING_ATTEMPTS = 2;
     const MAX_REPORTED_ISSUES = 30;
@@ -239,7 +240,8 @@ final class JFF_TRP_Manager {
                     'scope_mode' => self::SCOPE_MODE,
                     'languages' => $langs, 'urls' => $urls, 'url_count' => count($urls), 'lang_index' => 0, 'url_index' => 0,
                     'pass' => 0, 'passes' => 2, 'db_cursor' => 0, 'db_scanned' => 0,
-                    'urls_done' => 0, 'strings_done' => 0, 'strings_unchanged' => 0,
+                    'urls_done' => 0, 'urls_skipped' => 0, 'page_issues' => [],
+                    'strings_done' => 0, 'strings_unchanged' => 0,
                     'strings_skipped' => 0, 'failed' => 0, 'last_error' => '',
                     'retry_counts' => [], 'review_items' => [],
                     'created' => time(), 'updated' => time(), 'next_attempt' => 0,
@@ -628,7 +630,13 @@ final class JFF_TRP_Manager {
                     "SELECT COUNT(*) FROM {$seen} WHERE job_id = %s", $job['id']
                 ));
                 if ($captured === 0) {
-                    throw new RuntimeException('No page strings were captured during discovery; aborting rather than scanning the dictionary.');
+                    // No confirmed text is not a fatal worker error. Preserve existing
+                    // translations, report incomplete discovery and finish without
+                    // scanning the site's historical dictionary.
+                    $job['phase'] = 'finished';
+                    $job['status'] = 'finished_with_issues';
+                    $job['last_error'] = 'No strings were captured on the selected public URLs. Review skipped pages and cache before trying again.';
+                    return;
                 }
                 $job['phase'] = 'dictionary';
                 $job['lang_index'] = 0;
@@ -639,7 +647,8 @@ final class JFF_TRP_Manager {
                 $job['url_index'] = 0;
             } else {
                 $job['phase'] = 'finished';
-                $job['status'] = !empty($job['review_items']) ? 'finished_with_issues' : 'finished';
+                $job['status'] = (!empty($job['review_items']) || (int) ($job['urls_skipped'] ?? 0) > 0)
+                    ? 'finished_with_issues' : 'finished';
             }
             return;
         }
@@ -683,22 +692,76 @@ final class JFF_TRP_Manager {
             'headers' => ['Cache-Control' => 'no-cache', 'Pragma' => 'no-cache'],
             'user-agent' => 'Mozilla/5.0 JFF-TranslatePress-Internal-Worker',
         ]);
-        if (is_wp_error($response)) {
-            throw new RuntimeException('Could not fetch ' . $lang . ' page: ' . $response->get_error_code());
+        $issue = self::crawl_response_issue($response, $job['phase']);
+        if ($issue !== null) {
+            self::record_page_issue($job, $lang, $original_url, $issue);
         }
-        $http = (int) wp_remote_retrieve_response_code($response);
-        if ($http < 200 || $http >= 300) {
-            throw new RuntimeException('Localized page returned HTTP ' . $http . ' in ' . $lang . ' (' . $job['phase'] . ').');
-        }
-        if (strtolower((string) wp_remote_retrieve_header($response, 'x-litespeed-cache')) === 'hit') {
-            throw new RuntimeException('LiteSpeed returned a cached page; discovery cannot be verified. Configure URL cache bypass.');
-        }
-        if ($job['phase'] === 'discover' &&
-            (string) wp_remote_retrieve_header($response, 'x-jff-trp-discovery') !== '1') {
-            throw new RuntimeException('Discovery page did not activate string capture; check page cache and server headers.');
-        }
+        // Even if this URL does not produce verifiable text, continue to the
+        // next public page. Unverified pages are never added to the scoped
+        // dictionary and are reported separately for review.
         $job['url_index']++;
         $job['urls_done']++;
+    }
+
+    /**
+     * Decide whether an individual public page can contribute trustworthy
+     * strings to a scoped translation run. A missing capture header is not
+     * evidence of an empty page: it may be a redirect, cache, or non-WP route.
+     *
+     * Return a recoverable issue code, or null on a verified page.
+     * Only systemic server errors pause the entire job.
+     */
+    private static function crawl_response_issue($response, $phase) {
+        if (is_wp_error($response)) {
+            return 'request_failed';
+        }
+        $http = (int) wp_remote_retrieve_response_code($response);
+        if ($http === 429 || $http >= 500) {
+            throw new RuntimeException('Website returned HTTP ' . $http .
+                ' during ' . $phase . '. Pausing to avoid hiding a site-wide failure.');
+        }
+        if ($http < 200 || $http >= 300) {
+            return 'http_' . $http;
+        }
+        $type = strtolower(trim((string) wp_remote_retrieve_header($response, 'content-type')));
+        if ($type !== '' && strpos($type, 'text/html') === false &&
+            strpos($type, 'application/xhtml+xml') === false) {
+            return 'non_html_response';
+        }
+        if ($phase === 'discover' &&
+            strtolower(trim((string) wp_remote_retrieve_header($response, 'x-litespeed-cache'))) === 'hit') {
+            return 'cached_page';
+        }
+        if ($phase === 'discover' &&
+            trim((string) wp_remote_retrieve_header($response, 'x-jff-trp-discovery')) !== '1') {
+            return 'capture_not_confirmed';
+        }
+        // A verified empty HTML page is valid. It simply adds no strings.
+        return null;
+    }
+
+    /**
+     * Skip a single unverified URL and continue. Persist a bounded diagnostic
+     * history; never save protected discovery tokens or query strings.
+     */
+    private static function record_page_issue(&$job, $lang, $original_url, $reason) {
+        $job['urls_skipped'] = (int) ($job['urls_skipped'] ?? 0) + 1;
+        $index = (int) ($job['url_index'] ?? 0) + 1;
+        $path = (string) wp_parse_url($original_url, PHP_URL_PATH);
+        $path = substr($path !== '' ? $path : '/', 0, 160);
+        if (!isset($job['page_issues']) || !is_array($job['page_issues'])) {
+            $job['page_issues'] = [];
+        }
+        $job['page_issues'][] = [
+            'language' => $lang,
+            'page_number' => $index,
+            'path' => $path,
+            'phase' => $job['phase'],
+            'reason' => $reason,
+        ];
+        $job['page_issues'] = array_slice($job['page_issues'], -self::MAX_PAGE_ISSUES);
+        $job['last_error'] = 'Skipped ' . $lang . ' page ' . $index . ' (' . $path .
+            '): ' . $reason . '. Continuing; no strings from this response are assumed translated.';
     }
 
     private static function is_translatable($original) {

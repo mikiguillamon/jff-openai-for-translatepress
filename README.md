@@ -2,7 +2,7 @@
 
 A small standalone WordPress plugin that adds **one translation engine** to TranslatePress: OpenAI via the **Responses API**. This is not a fork of TranslatePress and does not replace its interface, language switcher, translation database, or visual translation editor.
 
-## Translation Manager (0.2.0-beta.4)
+## Translation Manager (0.2.0-beta.5)
 
 Open **Settings → OpenAI TranslatePress** after activating the plugin. The manager is separate from TranslatePress's own automatic-translation settings.
 
@@ -121,6 +121,13 @@ The activity record stores a timestamp, status, sanitized error code, and source
 **Important:** TranslatePress's own API credentials test page may display the API key. Never share screenshots of that page. Prefer the plugin's full translation test.
 
 ## Changelog
+
+### 0.2.0-beta.5
+- Continue site discovery past individual URLs with absent capture headers, cache hits, non-HTML responses and ordinary 4xx status, without considering them translated.
+- Keep a bounded list of unverified page paths and reasons, and distinguish verified requests from skipped pages in the UI.
+- Treat HTTP 429 or 5xx as systemic errors that pause, while an empty verified page is valid.
+- A job with unverified pages finishes with issues rather than falsely reporting complete coverage. Previously saved translations are retained.
+
 
 ### 0.2.0-beta.4
 - Scope bulk translation to strings actually observed while crawling the selected public URLs, stored as per-job hashes instead of source text.

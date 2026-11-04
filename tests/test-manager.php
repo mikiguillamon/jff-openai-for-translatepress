@@ -11,6 +11,7 @@ $GLOBALS['mock_hooks'] = [];
 function get_option($key, $fallback = []) { return $GLOBALS['settings'][$key] ?? $fallback; }
 function add_action($name, $callback, $priority = 10, $args = 1) { $GLOBALS['mock_hooks'][$name][] = $callback; }
 function add_filter($name, $callback, $priority = 10, $args = 1) { $GLOBALS['mock_hooks'][$name][] = $callback; }
+function apply_filters($name, $value) { return $value; }
 function sanitize_text_field($value) { return $value; }
 function wp_unslash($value) { return $value; }
 function wp_salt($purpose) { return 'testing-secret'; }
@@ -24,7 +25,9 @@ function get_permalink($id) { return 'https://example.test/about/'; }
 function get_post_type_archive_link($type) { return false; }
 function get_taxonomies($args, $format = 'names') { return []; }
 function get_terms($args) { return []; }
-function is_wp_error($response) { return false; }
+function is_wp_error($response) { return is_array($response) && !empty($response['wp_error']); }
+function wp_remote_retrieve_response_code($response) { return $response['status'] ?? 0; }
+function wp_remote_retrieve_header($response, $name) { return $response['headers'][$name] ?? ''; }
 class TRP_Translate_Press {
     public static function get_trp_instance() { return new self(); }
     public function get_component($part) { return null; }
@@ -122,4 +125,34 @@ $GLOBALS['settings']['jff_trp_bulk_job']['phase'] = 'warm';
 $wpdb->insert = '';
 JFF_TRP_Manager::capture_rendered_strings($original_dictionary, '', ['Some example'], 'es_ES');
 assert_test($wpdb->insert === '', 'Warm passes do not add unobserved strings to discovery queue');
+$response = ['status'=>200, 'headers'=>['content-type'=>'text/html', 'x-jff-trp-discovery'=>'1']];
+assert_test(invoke_private('crawl_response_issue', $response, 'discover') === null,
+    'Verified rendered page may contain no translatable strings');
+$response['headers']['x-jff-trp-discovery'] = '';
+assert_test(invoke_private('crawl_response_issue', $response, 'discover') === 'capture_not_confirmed',
+    'Missing capture header is a recoverable page issue');
+$response['headers']['x-litespeed-cache'] = 'hit';
+assert_test(invoke_private('crawl_response_issue', $response, 'discover') === 'cached_page',
+    'Cached page is not silently treated as discovered');
+assert_test(invoke_private('crawl_response_issue', $response, 'warm') === null,
+    'Cached page is normal during warming of translated content');
+assert_test(invoke_private('crawl_response_issue', ['status'=>404, 'headers'=>[]], 'discover') === 'http_404',
+    'One unavailable URL may be skipped without failing whole job');
+assert_test(invoke_private('crawl_response_issue', ['status'=>200, 'headers'=>['content-type'=>'application/pdf']], 'discover') === 'non_html_response',
+    'Non-HTML resources do not contribute discovery strings');
+try {
+    invoke_private('crawl_response_issue', ['status'=>503, 'headers'=>[]], 'discover');
+    assert_test(false, 'Server errors must halt');
+} catch (RuntimeException $e) {
+    assert_test(strpos($e->getMessage(), 'HTTP 503') !== false, 'Systemic HTTP 503 pauses job');
+}
+$bad_page_job = ['url_index'=>1, 'phase'=>'discover', 'urls_skipped'=>0, 'page_issues'=>[], 'last_error'=>''];
+$page_issue_method = new ReflectionMethod(JFF_TRP_Manager::class, 'record_page_issue');
+$page_issue_method->setAccessible(true);
+$page_issue_method->invokeArgs(null, [&$bad_page_job, 'es_ES',
+    'https://example.test/catalog/?jff_trp_signature=secret', 'capture_not_confirmed']);
+assert_test($bad_page_job['urls_skipped'] === 1 &&
+    $bad_page_job['page_issues'][0]['path'] === '/catalog/' &&
+    strpos(json_encode($bad_page_job), 'secret') === false,
+    'Skipped page is recorded without private URL query parameters');
 echo "All manager smoke tests passed.\n";
