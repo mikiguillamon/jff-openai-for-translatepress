@@ -122,6 +122,12 @@ The activity record stores a timestamp, status, sanitized error code, and source
 
 ## Changelog
 
+### 0.2.0-beta.3
+- Skip URI-like technical references such as tel: and mailto: before contacting OpenAI.
+- Retry any other silently skipped string once in a fresh request; then leave it pending for review and continue translating.
+- Record `translatepress_no_api_call` rather than misattributing a previous successful response.
+
+
 ### 0.1.2
 - Add administrator-only full translation test with WordPress nonce validation.
 - Record the last frontend translation activity and a safe error code.
