@@ -46,7 +46,7 @@ final class JFF_TRP_OpenAI_Engine extends TRP_Machine_Translator {
             return [];
         }
         if (!$this->verify_request_parameters($target_language_code, $source_language_code)) {
-            $this->record_activity('skipped', 'translatepress_validation', $source_language_code, $target_language_code);
+            $this->record_activity('skipped', $this->explain_validation_failure($source_language_code, $target_language_code), $source_language_code, $target_language_code);
             return [];
         }
 
@@ -266,20 +266,68 @@ final class JFF_TRP_OpenAI_Engine extends TRP_Machine_Translator {
         return max($min, min($max, (int) $value));
     }
 
-    private function record_activity($status, $code, $source, $target) {
-        $previous = get_option('jff_openai_translation_activity', []);
-        if (is_array($previous) && ($previous['status'] ?? '') === $status &&
-            ($previous['code'] ?? '') === $code &&
-            time() - (int) ($previous['time'] ?? 0) < 30) {
-            return;
+    private function explain_validation_failure($source, $target) {
+        $key = $this->get_api_key();
+        if (!is_string($key) || trim($key) === '') {
+            return 'missing_api_key';
         }
-        // Only timestamp, status, safe error code and language labels.
-        update_option('jff_openai_translation_activity', [
+        if (empty($source) || empty($target)) {
+            return 'missing_language';
+        }
+        $codes = (array) $this->machine_translation_codes;
+        if (empty($codes[$source]) || empty($codes[$target])) {
+            return 'language_code_unavailable';
+        }
+        if ($codes[$source] === $codes[$target]) {
+            return 'same_source_target_language';
+        }
+        if (!$this->extra_request_validations($target)) {
+            return 'extra_validation_failed';
+        }
+
+        $mt = $this->settings['trp_machine_translation_settings'] ?? [];
+        if (($mt['block-crawlers'] ?? 'no') === 'yes' && !empty($_SERVER['HTTP_USER_AGENT'])) {
+            $pattern = apply_filters('trp_machine_translator_crawlers',
+                'rambler|abacho|acoi|accona|aspseek|altavista|estyle|scrubby|lycos|geona|ia_archiver|alexa|sogou|skype|facebook|twitter|pinterest|linkedin|naver|bing|google|yahoo|duckduckgo|yandex|baidu|teoma|xing|java\/1.7.0_45|bot|crawl|slurp|spider|mediapartners|\sask\s|\saol\s');
+            if (is_string($pattern) && @preg_match('/' . $pattern . '/i', sanitize_text_field($_SERVER['HTTP_USER_AGENT']))) {
+                return 'crawler_blocked';
+            }
+        }
+        if ($this->machine_translator_logger->quota_exceeded()) {
+            return 'daily_character_limit_reached';
+        }
+        return 'other_translatepress_validation';
+    }
+
+    private function record_activity($status, $code, $source, $target) {
+        $language = substr(sanitize_text_field($source . ' > ' . $target), 0, 60);
+        $record = [
             'time' => time(),
             'status' => $status,
             'code' => preg_replace('/[^a-zA-Z0-9_]/', '', (string) $code),
-            'language' => substr(sanitize_text_field($source . ' > ' . $target), 0, 60),
-        ], false);
+            'language' => $language,
+        ];
+        $previous = get_option('jff_openai_translation_activity', []);
+        if (is_array($previous) && ($previous['status'] ?? '') === $status &&
+            ($previous['code'] ?? '') === $record['code'] &&
+            ($previous['language'] ?? '') === $language &&
+            time() - (int) ($previous['time'] ?? 0) < 30) {
+            return;
+        }
+        update_option('jff_openai_translation_activity', $record, false);
+
+        $by_language = get_option('jff_openai_translation_activity_by_language', []);
+        if (!is_array($by_language)) {
+            $by_language = [];
+        }
+        $by_language[$language] = $record;
+        if (count($by_language) > 12) {
+            uasort($by_language, function ($a, $b) {
+                return (int) ($a['time'] ?? 0) <=> (int) ($b['time'] ?? 0);
+            });
+            $by_language = array_slice($by_language, -12, null, true);
+        }
+        update_option('jff_openai_translation_activity_by_language', $by_language, false);
     }
 
     private function safe_log($error_code) {
