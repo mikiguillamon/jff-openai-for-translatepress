@@ -11,6 +11,7 @@ $GLOBALS['mock_hooks'] = [];
 function get_option($key, $fallback = []) { return $GLOBALS['settings'][$key] ?? $fallback; }
 function add_action($name, $callback, $priority = 10, $args = 1) { $GLOBALS['mock_hooks'][$name][] = $callback; }
 function add_filter($name, $callback, $priority = 10, $args = 1) { $GLOBALS['mock_hooks'][$name][] = $callback; }
+function apply_filters($name, $value) { return $value; }
 function sanitize_text_field($value) { return $value; }
 function wp_unslash($value) { return $value; }
 function wp_salt($purpose) { return 'testing-secret'; }
