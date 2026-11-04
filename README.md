@@ -13,6 +13,12 @@ A small standalone WordPress plugin that adds **one translation engine** to Tran
 - Uses TranslatePress's daily character quota and translation storage. Existing translations remain untouched.
 - Uses `store: false` on Responses API calls. Translation text still leaves your WordPress site and goes to OpenAI; review OpenAI data-handling terms before using customer information.
 
+## Update from 0.1.0 (important)
+
+Version **0.1.0** had a settings-save bug: TranslatePress drops unrecognized settings before passing the sanitized array to the custom engine filter. Our old callback did not accept the second, original-form argument, so the API key and custom settings were discarded on save. **Version 0.1.1 fixes this.**
+
+After updating, **re-enter the API key and save**, as 0.1.0 may never have stored it. Make sure the engine is selected and automatic translation is enabled, then use the secondary-language URL of a page with untranslated content. If the API key field says "Key saved - leave blank to keep" after reloading the settings page, it was retained. You should not need to reset any prior TranslatePress translations.
+
 ## Install
 
 1. Make a backup and test first in a staging site.
@@ -74,3 +80,10 @@ Because the test suite mocks WordPress and OpenAI, passing tests **does not repl
 ## Credits and license
 
 Original implementation by Just For Fun, inspired by the public integration strategy used in [Rankscale AI for TranslatePress](https://github.com/XuanRanL/Rankscale-AI-For-TranslatePress). No source files from Rankscale were bundled. License: GPL-2.0-or-later, in keeping with WordPress plugin distribution.
+
+## Changelog
+
+### 0.1.1
+- Fix missing API credentials and model settings on save: correctly receive the raw TranslatePress settings as the filter's second argument.
+- Preserve settings if another engine's form omits our inputs.
+- Add regression tests reproducing TranslatePress's settings whitelist.
