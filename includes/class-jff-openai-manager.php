@@ -319,7 +319,19 @@ final class JFF_TRP_Manager {
         if (!is_array($job) || empty($job['id'])) {
             return null;
         }
+        $job_id = $job['id'];
         unset($job['urls'], $job['id'], $job['retry_counts']);
+        if (self::is_scoped_job($job)) {
+            global $wpdb;
+            $seen = self::seen_table_name();
+            $job['observed_strings_by_language'] = [];
+            foreach ((array) ($job['languages'] ?? []) as $lang) {
+                $job['observed_strings_by_language'][$lang] = (int) $wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$seen} WHERE job_id = %s AND language = %s",
+                    $job_id, $lang
+                ));
+            }
+        }
         $job['url_total'] = isset($job['languages']) ? count($job['languages']) * (int) ($job['passes'] ?? 1) * (int) ($job['url_count'] ?? 0) : 0;
         return $job;
     }
@@ -610,6 +622,14 @@ final class JFF_TRP_Manager {
         $lang = $job['languages'][$job['lang_index']] ?? null;
         if ($lang === null) {
             if ($job['phase'] === 'discover') {
+                global $wpdb;
+                $seen = self::seen_table_name();
+                $captured = (int) $wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$seen} WHERE job_id = %s", $job['id']
+                ));
+                if ($captured === 0) {
+                    throw new RuntimeException('No page strings were captured during discovery; aborting rather than scanning the dictionary.');
+                }
                 $job['phase'] = 'dictionary';
                 $job['lang_index'] = 0;
                 $job['db_cursor'] = 0;
