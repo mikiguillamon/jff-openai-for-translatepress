@@ -33,7 +33,8 @@
         'Status: ' + job.status,
         'Phase: ' + job.phase,
         'Languages: ' + (job.languages || []).join(', '),
-        'Public URLs visited: ' + (job.urls_done || 0) + ' / ' + (job.url_total || 0),
+        'Public URLs checked: ' + (job.urls_done || 0) + ' / ' + (job.url_total || 0),
+        'Pages not verified (review): ' + (job.urls_skipped || 0),
         'Scoped dictionary strings saved: ' + (job.strings_done || 0),
         'Changed from original: ' + Math.max(0, (job.strings_done || 0) - (job.strings_unchanged || 0)),
         'Saved unchanged: ' + (job.strings_unchanged || 0),
@@ -52,6 +53,9 @@
         lines.push('Previous job scope is obsolete: stop and start a fresh job after upgrading. Saved translations remain intact.');
       }
       if (job.last_error) lines.push('Last message: ' + job.last_error);
+      for (const issue of (job.page_issues || []).slice(-5)) {
+        lines.push('Page skipped: ' + issue.language + ' #' + issue.page_number + ' ' + issue.path + ' (' + issue.reason + ')');
+      }
       for (const item of (job.review_items || []).slice(-5)) {
         lines.push('Review: ' + item.language + ' dictionary ID ' + item.id + ', engine ' + item.engine_status + '/' + item.reason + ', HTTP ' + item.http);
       }
