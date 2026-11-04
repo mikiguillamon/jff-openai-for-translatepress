@@ -12,6 +12,7 @@ function get_option($key, $fallback = []) { return $GLOBALS['settings'][$key] ??
 function add_action($name, $callback, $priority = 10, $args = 1) { $GLOBALS['mock_hooks'][$name][] = $callback; }
 function add_filter($name, $callback, $priority = 10, $args = 1) { $GLOBALS['mock_hooks'][$name][] = $callback; }
 function apply_filters($name, $value) { return $value; }
+function wp_doing_cron() { return $GLOBALS['mock_cron'] ?? false; }
 function sanitize_text_field($value) { return $value; }
 function wp_unslash($value) { return $value; }
 function wp_salt($purpose) { return 'testing-secret'; }
@@ -28,9 +29,23 @@ function get_terms($args) { return []; }
 function is_wp_error($response) { return is_array($response) && !empty($response['wp_error']); }
 function wp_remote_retrieve_response_code($response) { return $response['status'] ?? 0; }
 function wp_remote_retrieve_header($response, $name) { return $response['headers'][$name] ?? ''; }
+class JFF_TranslatePress_OpenAI { const ENGINE = 'jff_openai_responses'; }
+class JFF_TRP_OpenAI_Engine {}
 class TRP_Translate_Press {
-    public static function get_trp_instance() { return new self(); }
-    public function get_component($part) { return null; }
+    public static $instance = null;
+    public $engine = null;
+    public $initializations = 0;
+    public static function get_trp_instance() {
+        if (self::$instance === null) self::$instance = new self();
+        return self::$instance;
+    }
+    public function get_component($part) {
+        return $part === 'machine_translator' ? $this->engine : null;
+    }
+    public function init_machine_translation() {
+        $this->initializations++;
+        $this->engine = new JFF_TRP_OpenAI_Engine();
+    }
 }
 require dirname(__DIR__) . '/includes/class-jff-openai-manager.php';
 function assert_test($condition, $description) {
@@ -155,4 +170,45 @@ assert_test($bad_page_job['urls_skipped'] === 1 &&
     $bad_page_job['page_issues'][0]['path'] === '/catalog/' &&
     strpos(json_encode($bad_page_job), 'secret') === false,
     'Skipped page is recorded without private URL query parameters');
+$GLOBALS['settings']['trp_machine_translation_settings'] = [
+    'machine-translation'=>'yes',
+    'translation-engine'=>'jff_openai_responses'
+];
+$GLOBALS['mock_cron'] = true;
+$trp = TRP_Translate_Press::get_trp_instance();
+$trp->engine = null;
+$instance = invoke_private('require_engine');
+assert_test($instance === $trp && $trp->engine instanceof JFF_TRP_OpenAI_Engine &&
+    $trp->initializations === 1, 'Cron restores missing TranslatePress machine engine via public initializer');
+invoke_private('require_engine');
+assert_test($trp->initializations === 1, 'Already-active engine does not get reinitialized');
+$GLOBALS['mock_cron'] = false;
+$trp->engine = null;
+try {
+    invoke_private('require_engine');
+    assert_test(false, 'Web execution without engine should fail');
+} catch (RuntimeException $e) {
+    assert_test(strpos($e->getMessage(), 'context web') !== false,
+        'Web engine failure is diagnosed rather than masked');
+}
+$GLOBALS['mock_cron'] = true;
+$retry = new ReflectionMethod(JFF_TRP_Manager::class, 'defer_transient_failure');
+$retry->setAccessible(true);
+$transient_job = ['phase'=>'dictionary', 'lang_index'=>1, 'languages'=>['es_ES','de_DE'],
+    'status'=>'running', 'failed'=>0, 'transient_history'=>[]];
+for ($attempt = 1; $attempt <= 4; $attempt++) {
+    $retry->invokeArgs(null, [&$transient_job, new JFF_TRP_Retryable_Exception('HTTP 503')]);
+    assert_test($transient_job['status'] === 'waiting' &&
+        $transient_job['transient_failures'] === $attempt &&
+        $transient_job['next_attempt'] > time(),
+        'Transient failure retries with bounded delay (attempt ' . $attempt . ')');
+}
+$retry->invokeArgs(null, [&$transient_job, new JFF_TRP_Retryable_Exception('HTTP 503')]);
+assert_test($transient_job['status'] === 'paused' && $transient_job['failed'] === 1 &&
+    count($transient_job['transient_history']) === 5,
+    'After retry budget exhausted, job pauses and history stays bounded');
+assert_test(invoke_private('retryable_http_error', 429) &&
+    invoke_private('retryable_http_error', 503) &&
+    !invoke_private('retryable_http_error', 403),
+    'Only HTTP 429 or 5xx is retryable by default');
 echo "All manager smoke tests passed.\n";

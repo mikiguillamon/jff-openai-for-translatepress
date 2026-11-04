@@ -2,7 +2,7 @@
 
 A small standalone WordPress plugin that adds **one translation engine** to TranslatePress: OpenAI via the **Responses API**. This is not a fork of TranslatePress and does not replace its interface, language switcher, translation database, or visual translation editor.
 
-## Translation Manager (0.2.0-beta.5)
+## Translation Manager (0.2.0-beta.6)
 
 Open **Settings → OpenAI TranslatePress** after activating the plugin. The manager is separate from TranslatePress's own automatic-translation settings.
 
@@ -121,6 +121,13 @@ The activity record stores a timestamp, status, sanitized error code, and source
 **Important:** TranslatePress's own API credentials test page may display the API key. Never share screenshots of that page. Prefer the plugin's full translation test.
 
 ## Changelog
+
+### 0.2.0-beta.6
+- Recover TranslatePress's selected machine translation engine when WordPress cron skips its frontend initialization hook.
+- Back off and retry recoverable OpenAI HTTP 429/5xx, site HTTP 429/5xx and WP HTTP transport errors automatically, up to four consecutive retries.
+- Track bounded transient-failure history and counters in the dashboard. Configuration and SQL errors still pause for manual review.
+- Resume the same scoped translation job without resetting translations; avoid marking unsuccessful strings as translated.
+
 
 ### 0.2.0-beta.5
 - Continue site discovery past individual URLs with absent capture headers, cache hits, non-HTML responses and ordinary 4xx status, without considering them translated.

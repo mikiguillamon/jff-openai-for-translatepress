@@ -9,6 +9,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/** Recoverable worker error. The job retries automatically with a bounded delay. */
+class JFF_TRP_Retryable_Exception extends RuntimeException {}
+
 final class JFF_TRP_Manager {
     const JOB_OPTION = 'jff_trp_bulk_job';
     const LOCK_OPTION = 'jff_trp_bulk_worker_lock';
@@ -20,6 +23,8 @@ final class JFF_TRP_Manager {
     const SCOPE_MODE = 'rendered_urls_v1';
     const MAX_STRING_ATTEMPTS = 2;
     const MAX_REPORTED_ISSUES = 30;
+    const MAX_TRANSIENT_RETRIES = 4;
+    const MAX_TRANSIENT_HISTORY = 12;
 
     public static function boot() {
         add_action('admin_menu', [__CLASS__, 'menu']);
@@ -145,8 +150,26 @@ final class JFF_TRP_Manager {
         }
         $trp = TRP_Translate_Press::get_trp_instance();
         $engine = $trp->get_component('machine_translator');
+
+        // TranslatePress may omit init_machine_translation() on WP-Cron:
+        // its frontend hooks return early when doing_wp_cron is set.
+        // WP-Cron is also our backup worker, so reconstruct the selected
+        // engine through TranslatePress's own public initializer here.
+        $cron = (function_exists('wp_doing_cron') && wp_doing_cron()) ||
+            (defined('DOING_CRON') && DOING_CRON);
+        if (!($engine instanceof JFF_TRP_OpenAI_Engine) && $cron &&
+            method_exists($trp, 'init_machine_translation')) {
+            $trp->init_machine_translation();
+            $engine = $trp->get_component('machine_translator');
+        }
         if (!($engine instanceof JFF_TRP_OpenAI_Engine)) {
-            throw new RuntimeException('The active engine is not OpenAI (JFF).');
+            $actual = is_object($engine) ? get_class($engine) : gettype($engine);
+            $detail = 'TranslatePress engine unavailable (' . $actual . ', context ' .
+                ($cron ? 'cron' : 'web') . '); OpenAI (JFF) remains selected in settings.';
+            if ($cron) {
+                throw new JFF_TRP_Retryable_Exception($detail);
+            }
+            throw new RuntimeException($detail);
         }
         return $trp;
     }
@@ -241,6 +264,7 @@ final class JFF_TRP_Manager {
                     'languages' => $langs, 'urls' => $urls, 'url_count' => count($urls), 'lang_index' => 0, 'url_index' => 0,
                     'pass' => 0, 'passes' => 2, 'db_cursor' => 0, 'db_scanned' => 0,
                     'urls_done' => 0, 'urls_skipped' => 0, 'page_issues' => [],
+                    'transient_failures' => 0, 'transient_retries' => 0, 'transient_history' => [],
                     'strings_done' => 0, 'strings_unchanged' => 0,
                     'strings_skipped' => 0, 'failed' => 0, 'last_error' => '',
                     'retry_counts' => [], 'review_items' => [],
@@ -595,6 +619,14 @@ final class JFF_TRP_Manager {
         try {
             self::require_engine();
             self::tick($job);
+            if ((int) ($job['transient_failures'] ?? 0) > 0) {
+                $job['transient_failures'] = 0;
+                if (strpos((string) ($job['last_error'] ?? ''), 'Temporary worker issue:') === 0) {
+                    $job['last_error'] = '';
+                }
+            }
+        } catch (JFF_TRP_Retryable_Exception $e) {
+            self::defer_transient_failure($job, $e);
         } catch (Throwable $e) {
             $job['status'] = 'paused';
             $job['last_error'] = substr($e->getMessage(), 0, 450);
@@ -618,6 +650,40 @@ final class JFF_TRP_Manager {
         } elseif ($job['status'] === 'waiting') {
             self::schedule($job);
         }
+    }
+
+    /** Retry temporary failures automatically; pause on the fifth consecutive failure. */
+    private static function defer_transient_failure(&$job, $error) {
+        $attempt = (int) ($job['transient_failures'] ?? 0) + 1;
+        $job['transient_failures'] = $attempt;
+        $job['transient_retries'] = (int) ($job['transient_retries'] ?? 0) + 1;
+        $message = substr($error->getMessage(), 0, 260);
+        $history = (array) ($job['transient_history'] ?? []);
+        $history[] = [
+            'time' => time(),
+            'attempt' => $attempt,
+            'phase' => (string) ($job['phase'] ?? ''),
+            'language' => $job['languages'][$job['lang_index'] ?? 0] ?? '',
+            'reason' => $message,
+        ];
+        $job['transient_history'] = array_slice($history, -self::MAX_TRANSIENT_HISTORY);
+        if ($attempt > self::MAX_TRANSIENT_RETRIES) {
+            $job['status'] = 'paused';
+            $job['failed'] = (int) ($job['failed'] ?? 0) + 1;
+            $job['last_error'] = 'Temporary worker issue: ' . $message .
+                '. Automatic retries exhausted; inspect hosting and TranslatePress configuration.';
+            return;
+        }
+        $delay = min(900, 60 * (1 << ($attempt - 1)));
+        $job['status'] = 'waiting';
+        $job['next_attempt'] = time() + $delay;
+        $job['last_error'] = 'Temporary worker issue: ' . $message .
+            '. Retrying automatically (' . $attempt . '/' . self::MAX_TRANSIENT_RETRIES .
+            ') after ' . $delay . ' seconds.';
+    }
+
+    private static function retryable_http_error($status) {
+        return is_int($status) && ($status === 429 || $status >= 500);
     }
 
     private static function tick(&$job) {
@@ -717,8 +783,8 @@ final class JFF_TRP_Manager {
         }
         $http = (int) wp_remote_retrieve_response_code($response);
         if ($http === 429 || $http >= 500) {
-            throw new RuntimeException('Website returned HTTP ' . $http .
-                ' during ' . $phase . '. Pausing to avoid hiding a site-wide failure.');
+            throw new JFF_TRP_Retryable_Exception('Website returned HTTP ' . $http .
+                ' during ' . $phase . '.');
         }
         if ($http < 200 || $http >= 300) {
             return 'http_' . $http;
@@ -878,7 +944,13 @@ final class JFF_TRP_Manager {
                 $new_http = array_slice($http, $before);
                 foreach ($new_http as $code) {
                     if ($code !== 200) {
-                        throw new RuntimeException('Translation request failed (' . (is_int($code) ? 'HTTP ' . $code : $code) . ').');
+                        $message = 'Translation request failed (' .
+                            (is_int($code) ? 'HTTP ' . $code : $code) . ').';
+                        if (self::retryable_http_error($code) ||
+                            (is_string($code) && strpos($code, 'WP_ERROR:') === 0)) {
+                            throw new JFF_TRP_Retryable_Exception($message);
+                        }
+                        throw new RuntimeException($message);
                     }
                 }
                 $first_missing = null;
