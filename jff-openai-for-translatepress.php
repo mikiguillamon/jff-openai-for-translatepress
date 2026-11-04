@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OpenAI for TranslatePress (JFF)
  * Description: Adds an independent OpenAI Responses API translation engine to TranslatePress. Use your own API key and model ID.
- * Version: 0.1.1
+ * Version: 0.1.2
  * Author: Just For Fun
  * Requires at least: 6.0
  * Requires PHP: 7.4
@@ -17,11 +17,12 @@ if (!defined('ABSPATH')) {
 
 final class JFF_TranslatePress_OpenAI {
     const ENGINE = 'jff_openai_responses';
-    const VERSION = '0.1.1';
+    const VERSION = '0.1.2';
     const PREFIX = 'jff_openai_';
 
     public static function boot() {
         add_action('admin_notices', [__CLASS__, 'dependency_notice']);
+        add_action('admin_post_jff_openai_translation_test', [__CLASS__, 'run_translation_test']);
         add_filter('trp_machine_translation_engines', [__CLASS__, 'register_engine'], 20);
         add_filter('trp_automatic_translation_engines_classes', [__CLASS__, 'register_engine_class'], 20);
         add_action('trp_machine_translation_extra_settings_middle', [__CLASS__, 'render_settings'], 20);
@@ -97,6 +98,34 @@ final class JFF_TranslatePress_OpenAI {
         $settings[self::PREFIX . 'context'] = is_string($context) ? substr($context, 0, 800) : '';
 
         return $settings;
+    }
+
+    public static function run_translation_test() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions.');
+        }
+        check_admin_referer('jff_openai_translation_test');
+        $result = ['status' => 'error', 'message' => 'TranslatePress engine is unavailable.'];
+
+        if (class_exists('TRP_Translate_Press')) {
+            $trp = TRP_Translate_Press::get_trp_instance();
+            $engine = $trp->get_component('machine_translator');
+            if ($engine instanceof JFF_TRP_OpenAI_Engine) {
+                $response = $engine->send_request('en', 'es', ['Hello, world!']);
+                $parsed = $engine->parse_response($response, ['Hello, world!']);
+                if (is_wp_error($parsed)) {
+                    $result['message'] = $parsed->get_error_code() . ': ' . $parsed->get_error_message();
+                } else {
+                    $result = ['status' => 'success', 'message' => 'OpenAI returned a valid translation: ' . $parsed[0]];
+                }
+            } else {
+                $result['message'] = 'The active TranslatePress engine is not OpenAI (JFF).';
+            }
+        }
+
+        set_transient('jff_openai_test_' . get_current_user_id(), $result, 120);
+        wp_safe_redirect(admin_url('admin.php?page=trp_machine_translation&jff_openai_test=1'));
+        exit;
     }
 
     private static function clamp_int($value, $min, $max, $fallback) {
@@ -185,6 +214,41 @@ final class JFF_TranslatePress_OpenAI {
                           name="trp_machine_translation_settings[<?php echo esc_attr(self::PREFIX . 'context'); ?>]"><?php echo esc_textarea($context); ?></textarea>
                 <span class="trp-description-text">For example: industry, formal/informal tone, terms not to translate. Sent with each translation request.</span>
             </div>
+            <?php if (($settings['translation-engine'] ?? '') === self::ENGINE) : ?>
+                <div style="margin-top:18px;padding:14px;border:1px solid #c3c4c7;background:#fff;max-width:670px;">
+                    <strong>Translation diagnostics</strong>
+                    <?php
+                    $enabled = ($settings['machine-translation'] ?? 'no') === 'yes';
+                    $activity = get_option('jff_openai_translation_activity', []);
+                    if (!is_array($activity)) {
+                        $activity = [];
+                    }
+                    ?>
+                    <p>Automatic translation: <strong><?php echo esc_html($enabled ? 'Enabled' : 'Disabled'); ?></strong>.
+                       OpenAI API key: <strong><?php echo esc_html(($has_constant || $has_saved_key) ? 'Configured' : 'Missing'); ?></strong>.</p>
+                    <?php if (!empty($activity['time'])) : ?>
+                        <p>Last frontend translation event: <strong><?php echo esc_html($activity['status'] ?? 'unknown'); ?></strong>
+                           (<?php echo esc_html(gmdate('Y-m-d H:i:s', (int) $activity['time'])); ?> UTC).
+                           <?php if (!empty($activity['code'])) : ?>
+                               Code: <code><?php echo esc_html($activity['code']); ?></code>.
+                           <?php endif; ?>
+                           <?php if (!empty($activity['language'])) : ?>
+                               Languages: <code><?php echo esc_html($activity['language']); ?></code>.
+                           <?php endif; ?></p>
+                    <?php else : ?>
+                        <p>No frontend translation attempts have been recorded yet. Visit a page with untranslated text in a secondary language, then reload this settings page.</p>
+                    <?php endif; ?>
+                    <?php if (isset($_GET['jff_openai_test']) && $_GET['jff_openai_test'] === '1') : ?>
+                        <?php $test = get_transient('jff_openai_test_' . get_current_user_id()); ?>
+                        <?php if (is_array($test)) : ?>
+                            <p><strong>API translation test (<?php echo esc_html($test['status'] ?? 'error'); ?>):</strong>
+                            <?php echo esc_html($test['message'] ?? 'Unknown result'); ?></p>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                    <p><a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=jff_openai_translation_test'), 'jff_openai_translation_test')); ?>">Test full translation (English to Spanish)</a></p>
+                    <p class="description">This test checks JSON parsing and translation validation, not just HTTP 200. Diagnostics never store the API key or translated page content.</p>
+                </div>
+            <?php endif; ?>
             <p class="trp-description-text" style="margin-top:16px;">Uses only OpenAI Responses API (HTTPS). No temperature, top_p or legacy max_tokens. Already saved TranslatePress translations are not overwritten by this engine.</p>
         </div>
         <?php
