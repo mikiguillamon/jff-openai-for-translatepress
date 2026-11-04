@@ -632,7 +632,10 @@ final class JFF_TRP_Manager {
             $job['db_scanned'] += count($rows);
             return;
         }
-        $job['db_cursor'] = $last_scanned;
+        // Never advance beyond a pending selected row before its translation is saved.
+        // Otherwise a failed HTTP request could permanently skip an earlier row if
+        // later non-translatable rows were encountered during selection.
+        $job['db_cursor'] = min($last_scanned, (int) $selected[0]['id'] - 1);
         $settings = get_option('trp_settings', []);
         $source = $settings['default-language'] ?? '';
         if (!$engine->is_available([$source, $lang]) ||
