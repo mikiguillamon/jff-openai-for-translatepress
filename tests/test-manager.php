@@ -81,7 +81,7 @@ assert_test($job['status'] === 'waiting' &&
 $job['status'] = 'running';
 $retry_method->invokeArgs(null, [&$job, 'es_ES',
     ['id' => 149, 'original' => 'A problematic markup example'],
-    [200], [], ['status' => 0, 'translated' => '']);
+    [200], [], ['status' => 0, 'translated' => '']]);
 assert_test($job['status'] === 'running' &&
     $job['db_cursor'] === 149 &&
     $job['failed'] === 1 &&
