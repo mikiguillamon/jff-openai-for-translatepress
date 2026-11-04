@@ -37,11 +37,15 @@
         'Dictionary strings saved: ' + (job.strings_done || 0),
         'Saved unchanged: ' + (job.strings_unchanged || 0),
         'Skipped: ' + (job.strings_skipped || 0),
-        'Errors: ' + (job.failed || 0)
+        'Errors: ' + (job.failed || 0),
+        'Needs review: ' + (job.review_items || []).length
       ];
       if (job.next_attempt && job.status === 'waiting')
         lines.push('Next attempt: ' + new Date(job.next_attempt * 1000).toLocaleString());
       if (job.last_error) lines.push('Last message: ' + job.last_error);
+      for (const item of (job.review_items || []).slice(-5)) {
+        lines.push('Review: ' + item.language + ' dictionary ID ' + item.id + ', engine ' + item.engine_status + '/' + item.reason + ', HTTP ' + item.http);
+      }
       if (job.updated) lines.push('Updated: ' + new Date(job.updated * 1000).toLocaleString());
       state.textContent = lines.join('\n');
     }
