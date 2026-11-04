@@ -67,17 +67,19 @@ $job = [
     'retry_counts' => [], 'review_items' => [], 'status' => 'running',
     'last_error' => ''
 ];
-$GLOBALS['mock_options']['jff_openai_translation_activity'] = [
+$GLOBALS['settings']['jff_openai_translation_activity'] = [
     'status' => 'error', 'code' => 'jff_openai_unsafe_translation', 'time' => time()
 ];
-invoke_private('record_unstored_item', $job, 'es_ES',
+$retry_method = new ReflectionMethod(JFF_TRP_Manager::class, 'record_unstored_item');
+$retry_method->setAccessible(true);
+$retry_method->invokeArgs(null, [&$job, 'es_ES',
     ['id' => 149, 'original' => 'A problematic markup example'],
-    [200], [], ['status' => 0, 'translated' => '']);
+    [200], [], ['status' => 0, 'translated' => '']]);
 assert_test($job['status'] === 'waiting' &&
     $job['retry_counts']['es_ES:149'] === 1 &&
     $job['db_cursor'] === 148, 'First failed string schedules an isolated retry');
 $job['status'] = 'running';
-invoke_private('record_unstored_item', $job, 'es_ES',
+$retry_method->invokeArgs(null, [&$job, 'es_ES',
     ['id' => 149, 'original' => 'A problematic markup example'],
     [200], [], ['status' => 0, 'translated' => '']);
 assert_test($job['status'] === 'running' &&
