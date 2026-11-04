@@ -81,7 +81,30 @@ Because the test suite mocks WordPress and OpenAI, passing tests **does not repl
 
 Original implementation by Just For Fun, inspired by the public integration strategy used in [Rankscale AI for TranslatePress](https://github.com/XuanRanL/Rankscale-AI-For-TranslatePress). No source files from Rankscale were bundled. License: GPL-2.0-or-later, in keeping with WordPress plugin distribution.
 
+## Diagnosing missing automatic translations (v0.1.2)
+
+1. Open **Settings > TranslatePress > Automatic Translation**. Set Enable Automatic Translation to **Yes**, choose **OpenAI (own API key - JFF)** and save the settings.
+2. Check **Translation diagnostics** and select **Test full translation (English to Spanish)**. Unlike the standard credential check, this validates the translated text as well as the HTTP status.
+3. Open a page with untranslated text in the secondary language, bypassing full-page cache while diagnosing. Return to the settings and reload.
+4. Review **Last frontend translation event**:
+   - **No event:** TranslatePress did not call the engine; check whether there are untranslated strings and whether caching or another plugin is short-circuiting the request.
+   - **skipped / translatepress_validation:** TranslatePress rejected the request before it went to OpenAI. Check API key, source/target languages, daily character limit and crawler blocking.
+   - **started:** The engine entered an OpenAI request but did not record completion. Check PHP timeouts and server logs.
+   - **error / code:** The model or API response was rejected. HTTP failures show \`jff_openai_http_error\`, malformed JSON \`jff_openai_bad_json\`, missing segments \`jff_openai_bad_count\`, and changed HTML/placeholders \`jff_openai_unsafe_translation\`.
+   - **success / partial_success:** The engine returned validated translated text to TranslatePress. If the page still displays source text, investigate its translation database and page cache.
+
+The activity record stores a timestamp, status, sanitized error code, and source/target languages only. It does not store translated content, page text or API credentials. When a batch returns a malformed model response, individual segments may be retried. This can consume additional API tokens.
+
+**Important:** TranslatePress's own API credentials test page may display the API key. Never share screenshots of that page. Prefer the plugin's full translation test.
+
 ## Changelog
+
+### 0.1.2
+- Add administrator-only full translation test with WordPress nonce validation.
+- Record the last frontend translation activity and a safe error code.
+- Validate actual API response content during the built-in test, not merely the HTTP status.
+- Retry individual segments when model formatting invalidates a batch, without retrying HTTP errors.
+
 
 ### 0.1.1
 - Fix missing API credentials and model settings on save: correctly receive the raw TranslatePress settings as the filter's second argument.

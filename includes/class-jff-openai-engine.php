@@ -33,14 +33,20 @@ final class JFF_TRP_OpenAI_Engine extends TRP_Machine_Translator {
     }
 
     public function test_request() {
-        return $this->send_request('en', 'es', ['Hello, world!']);
+        $response = $this->send_request('en', 'es', ['Hello, world!']);
+        $parsed = $this->parse_response($response, ['Hello, world!']);
+        return is_wp_error($parsed) ? $parsed : $response;
     }
 
     public function translate_array($new_strings, $target_language_code, $source_language_code = null) {
         if ($source_language_code === null) {
             $source_language_code = $this->settings['default-language'] ?? '';
         }
-        if (empty($new_strings) || !$this->verify_request_parameters($target_language_code, $source_language_code)) {
+        if (empty($new_strings)) {
+            return [];
+        }
+        if (!$this->verify_request_parameters($target_language_code, $source_language_code)) {
+            $this->record_activity('skipped', 'translatepress_validation', $source_language_code, $target_language_code);
             return [];
         }
 
@@ -48,26 +54,49 @@ final class JFF_TRP_OpenAI_Engine extends TRP_Machine_Translator {
         $target = $this->locale_to_api_language($target_language_code);
         $batch_size = $this->setting_int('jff_openai_batch', 8, 1, 20);
         $translated = [];
+        $fallback_errors = ['jff_openai_bad_json', 'jff_openai_bad_count', 'jff_openai_bad_segment', 'jff_openai_unsafe_translation', 'jff_openai_empty_response', 'jff_openai_incomplete_response'];
 
         foreach (array_chunk($new_strings, $batch_size, true) as $chunk) {
+            $this->record_activity('started', '', $source, $target);
             $response = $this->send_request($source, $target, array_values($chunk));
             $parsed = $this->parse_response($response, array_values($chunk));
 
             if (is_wp_error($parsed)) {
-                $this->safe_log($parsed->get_error_code());
-                break; // Never cache failed or unchanged source text as a translation.
-            }
-
-            $keys = array_keys($chunk);
-            foreach ($parsed as $index => $translation) {
-                $translated[$keys[$index]] = $translation;
-            }
-
-            if (isset($this->machine_translator_logger) && is_object($this->machine_translator_logger)) {
-                $this->machine_translator_logger->count_towards_quota($chunk);
-                if ($this->machine_translator_logger->quota_exceeded()) {
+                $code = $parsed->get_error_code();
+                $this->record_activity('error', $code, $source, $target);
+                $this->safe_log($code);
+                if (count($chunk) <= 1 || !in_array($code, $fallback_errors, true)) {
                     break;
                 }
+
+                // Try malformed model output one segment at a time. Never retry HTTP errors.
+                $successful = [];
+                foreach ($chunk as $key => $original) {
+                    $single = $this->send_request($source, $target, [$original]);
+                    $one = $this->parse_response($single, [$original]);
+                    if (is_wp_error($one)) {
+                        $this->record_activity('error', $one->get_error_code(), $source, $target);
+                        $this->safe_log($one->get_error_code());
+                        continue;
+                    }
+                    $successful[$key] = $one[0];
+                }
+                $translated += $successful;
+                if ($successful) {
+                    $this->record_activity('partial_success', '', $source, $target);
+                    $this->machine_translator_logger->count_towards_quota(array_intersect_key($chunk, $successful));
+                }
+            } else {
+                $keys = array_keys($chunk);
+                foreach ($parsed as $index => $translation) {
+                    $translated[$keys[$index]] = $translation;
+                }
+                $this->record_activity('success', '', $source, $target);
+                $this->machine_translator_logger->count_towards_quota($chunk);
+            }
+
+            if ($this->machine_translator_logger->quota_exceeded()) {
+                break;
             }
         }
 
@@ -235,6 +264,22 @@ final class JFF_TRP_OpenAI_Engine extends TRP_Machine_Translator {
             return $fallback;
         }
         return max($min, min($max, (int) $value));
+    }
+
+    private function record_activity($status, $code, $source, $target) {
+        $previous = get_option('jff_openai_translation_activity', []);
+        if (is_array($previous) && ($previous['status'] ?? '') === $status &&
+            ($previous['code'] ?? '') === $code &&
+            time() - (int) ($previous['time'] ?? 0) < 30) {
+            return;
+        }
+        // Only timestamp, status, safe error code and language labels.
+        update_option('jff_openai_translation_activity', [
+            'time' => time(),
+            'status' => $status,
+            'code' => preg_replace('/[^a-zA-Z0-9_]/', '', (string) $code),
+            'language' => substr(sanitize_text_field($source . ' > ' . $target), 0, 60),
+        ], false);
     }
 
     private function safe_log($error_code) {
