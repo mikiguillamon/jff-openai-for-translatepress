@@ -104,6 +104,7 @@ $no_http['status']='running';
 $retry_method->invokeArgs(null, [&$no_http,'es_ES',['id'=>149,'original'=>'Unusual data'],[],[],['status'=>0,'translated'=>'']]);
 assert_test($no_http['db_cursor']===149 && $no_http['status']==='running' && $no_http['review_items'][0]['reason']==='translatepress_no_api_call','Repeated silent skip continues and reports accurate reason');
 class MockSeenDatabase {
+    public $prefix = 'wp_';
     public $insert = '';
     public function prepare($query, $params) { return $query . ' /* ' . count($params) . ' params */'; }
     public function query($query) { $this->insert = $query; return 1; }
