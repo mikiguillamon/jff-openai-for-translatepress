@@ -16,6 +16,8 @@ final class JFF_TRP_Manager {
     const PAGE_SLUG = 'jff-trp-manager';
     const BATCH_SIZE = 4;
     const STRINGS_PER_TICK = 8;
+    const MAX_STRING_ATTEMPTS = 2;
+    const MAX_REPORTED_ISSUES = 30;
 
     public static function boot() {
         add_action('admin_menu', [__CLASS__, 'menu']);
@@ -151,6 +153,7 @@ final class JFF_TRP_Manager {
                     'pass' => 0, 'passes' => 2, 'db_cursor' => 0, 'db_scanned' => 0,
                     'urls_done' => 0, 'strings_done' => 0, 'strings_unchanged' => 0,
                     'strings_skipped' => 0, 'failed' => 0, 'last_error' => '',
+                    'retry_counts' => [], 'review_items' => [],
                     'created' => time(), 'updated' => time(), 'next_attempt' => 0,
                 ];
                 update_option(self::JOB_OPTION, $job, false);
@@ -225,7 +228,7 @@ final class JFF_TRP_Manager {
         if (!is_array($job) || empty($job['id'])) {
             return null;
         }
-        unset($job['urls'], $job['id']);
+        unset($job['urls'], $job['id'], $job['retry_counts']);
         $job['url_total'] = isset($job['languages']) ? count($job['languages']) * (int) ($job['passes'] ?? 1) * (int) ($job['url_count'] ?? 0) : 0;
         return $job;
     }
@@ -490,7 +493,7 @@ final class JFF_TRP_Manager {
         }
         $job['updated'] = time();
         update_option(self::JOB_OPTION, $job, false);
-        if ($job['status'] === 'finished') {
+        if (in_array($job['status'], ['finished', 'finished_with_issues'], true)) {
             self::purge_cache();
         } elseif ($job['status'] === 'running') {
             self::schedule($job);
@@ -513,7 +516,7 @@ final class JFF_TRP_Manager {
                 $job['url_index'] = 0;
             } else {
                 $job['phase'] = 'finished';
-                $job['status'] = 'finished';
+                $job['status'] = !empty($job['review_items']) ? 'finished_with_issues' : 'finished';
             }
             return;
         }
@@ -621,6 +624,15 @@ final class JFF_TRP_Manager {
                 $last_scanned = $id;
                 continue;
             }
+            $retry_key = $lang . ':' . $id;
+            if (!empty($job['retry_counts'][$retry_key])) {
+                // Retry one rejected item in a new PHP worker, never after two chunks.
+                if ($selected) {
+                    break;
+                }
+                $selected[] = ['id' => $id, 'original' => $original];
+                break;
+            }
             $selected[] = ['id' => $id, 'original' => $original];
             if (count($selected) >= self::STRINGS_PER_TICK) {
                 break;
@@ -672,19 +684,40 @@ final class JFF_TRP_Manager {
                         throw new RuntimeException('Translation request failed (' . (is_int($code) ? 'HTTP ' . $code : $code) . ').');
                     }
                 }
+                $first_missing = null;
                 foreach ($chunk as $row) {
                     $stored = $wpdb->get_row($wpdb->prepare(
                         "SELECT status, translated FROM `{$table}` WHERE id = %d", $row['id']
                     ), ARRAY_A);
-                    if (!is_array($stored) || (int) ($stored['status'] ?? 0) !== 1 ||
-                        !is_string($stored['translated'] ?? null) || $stored['translated'] === '') {
-                        throw new RuntimeException('Translation not stored for ' . $lang . ' dictionary ID ' . $row['id'] . '.');
+                    if (is_array($stored) && (int) ($stored['status'] ?? 0) === 1 &&
+                        is_string($stored['translated'] ?? null) && $stored['translated'] !== '') {
+                        $job['strings_done']++;
+                        if ($stored['translated'] === $row['original']) {
+                            $job['strings_unchanged']++;
+                        }
+                        unset($job['retry_counts'][$lang . ':' . $row['id']]);
+                        // Keep cursor behind an unresolved row, even if later rows saved.
+                        if ($first_missing === null) {
+                            $job['db_cursor'] = $row['id'];
+                        }
+                    } elseif ($first_missing === null) {
+                        $first_missing = ['row' => $row, 'stored' => $stored];
                     }
-                    $job['strings_done']++;
-                    if ($stored['translated'] === $row['original']) {
-                        $job['strings_unchanged']++;
+                }
+                if ($first_missing !== null) {
+                    $item = $first_missing['row'];
+                    if ($wpdb->last_error !== '') {
+                        throw new RuntimeException('Dictionary database error in ' . $lang .
+                            ' at ID ' . $item['id'] . '. Inspect TranslatePress SQL error logs.');
                     }
-                    $job['db_cursor'] = $row['id'];
+                    if (!$new_http && !$result) {
+                        throw new RuntimeException('TranslatePress skipped ' . $lang . ' dictionary ID ' .
+                            $item['id'] . ' before calling OpenAI (no HTTP request). Check quota, filters and server logs.');
+                    }
+                    self::record_unstored_item($job, $lang, $item, $new_http, $result,
+                        $first_missing['stored']);
+                    // Stop worker; retry in a fresh request, not a third API batch.
+                    break;
                 }
                 if (!$new_http && !$result) {
                     throw new RuntimeException('TranslatePress skipped a translation batch before calling OpenAI.');
@@ -694,6 +727,51 @@ final class JFF_TRP_Manager {
             remove_action('http_api_debug', $watcher, 10);
         }
         $job['db_scanned'] += count($selected);
+    }
+
+    /**
+     * Retry an unsaved item in a new isolated worker, then retain it for review.
+     * Never write source text back as a successful translation.
+     */
+    private static function record_unstored_item(&$job, $lang, $row, $http, $result, $stored) {
+        $id = (int) $row['id'];
+        $key = $lang . ':' . $id;
+        $attempt = 1 + (int) ($job['retry_counts'][$key] ?? 0);
+        $job['retry_counts'][$key] = $attempt;
+        $last = get_option('jff_openai_translation_activity', []);
+        $code = 'unknown';
+        $state = 'unknown';
+        if (is_array($last) && !empty($last['time']) && time() - (int) $last['time'] <= 120) {
+            $code = preg_replace('/[^a-zA-Z0-9_]/', '', (string) ($last['code'] ?? '')) ?: 'none';
+            $state = preg_replace('/[^a-zA-Z0-9_]/', '', (string) ($last['status'] ?? '')) ?: 'unknown';
+        }
+        $http_label = $http ? implode(',', array_map('strval', $http)) : 'none';
+        $stored_status = is_array($stored) ? (int) ($stored['status'] ?? -1) : -1;
+        $summary = $lang . ' ID ' . $id . ' not stored (HTTP ' . $http_label .
+            ', engine ' . $state . '/' . $code . ', result_count ' . count((array) $result) .
+            ', row_status ' . $stored_status . ', bytes ' . strlen($row['original']) . ').';
+        if ($attempt < self::MAX_STRING_ATTEMPTS) {
+            $job['status'] = 'waiting';
+            $job['next_attempt'] = time() + 45;
+            $job['last_error'] = $summary . ' Retrying once as a single string in a fresh request.';
+            return;
+        }
+        // The row stays untranslated in the database; only this job skips its ID.
+        unset($job['retry_counts'][$key]);
+        $job['failed'] = (int) ($job['failed'] ?? 0) + 1;
+        $job['strings_skipped'] = (int) ($job['strings_skipped'] ?? 0) + 1;
+        $job['db_cursor'] = $id;
+        $issue = [
+            'language' => $lang, 'id' => $id, 'reason' => $code,
+            'http' => $http_label, 'engine_status' => $state,
+            'attempts' => $attempt, 'time' => time(),
+        ];
+        if (!isset($job['review_items']) || !is_array($job['review_items'])) {
+            $job['review_items'] = [];
+        }
+        $job['review_items'][] = $issue;
+        $job['review_items'] = array_slice($job['review_items'], -self::MAX_REPORTED_ISSUES);
+        $job['last_error'] = $summary . ' Left pending for review; continuing with the next string.';
     }
 
     private static function purge_cache() {
