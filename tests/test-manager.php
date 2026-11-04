@@ -61,4 +61,31 @@ $visible = invoke_private('public_job', [
 ]);
 assert_test(!isset($visible['id'], $visible['urls']) && $visible['url_total'] === 2,
     'Public status does not expose job ID or URL queue');
+
+$job = [
+    'db_cursor' => 148, 'failed' => 0, 'strings_skipped' => 0,
+    'retry_counts' => [], 'review_items' => [], 'status' => 'running',
+    'last_error' => ''
+];
+$GLOBALS['mock_options']['jff_openai_translation_activity'] = [
+    'status' => 'error', 'code' => 'jff_openai_unsafe_translation', 'time' => time()
+];
+invoke_private('record_unstored_item', $job, 'es_ES',
+    ['id' => 149, 'original' => 'A problematic markup example'],
+    [200], [], ['status' => 0, 'translated' => '']);
+assert_test($job['status'] === 'waiting' &&
+    $job['retry_counts']['es_ES:149'] === 1 &&
+    $job['db_cursor'] === 148, 'First failed string schedules an isolated retry');
+$job['status'] = 'running';
+invoke_private('record_unstored_item', $job, 'es_ES',
+    ['id' => 149, 'original' => 'A problematic markup example'],
+    [200], [], ['status' => 0, 'translated' => '']);
+assert_test($job['status'] === 'running' &&
+    $job['db_cursor'] === 149 &&
+    $job['failed'] === 1 &&
+    $job['review_items'][0]['reason'] === 'jff_openai_unsafe_translation',
+    'Repeated failure stays pending but does not block the remaining job');
+assert_test(!isset(invoke_private('public_job', $job)['retry_counts']),
+    'Job status does not disclose internal per-item retries');
+
 echo "All manager smoke tests passed.\n";
