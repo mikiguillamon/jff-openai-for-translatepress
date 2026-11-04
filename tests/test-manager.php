@@ -53,6 +53,10 @@ assert_test(invoke_private('is_translatable', 'A machine can handle this task.')
     'Natural language may be translated');
 assert_test(!invoke_private('is_translatable', 'https://example.test/test'),
     'Pure URLs are excluded');
+foreach (['tel:+34936921362', 'mailto:info@example.com', 'sms:+34936921362', 'geo:41.1,2.1', 'custom+app:record123'] as $technical) {
+    assert_test(!invoke_private('is_translatable', $technical), 'Technical reference excluded: ' . $technical);
+}
+assert_test(invoke_private('is_translatable', 'Note: this is a sentence'), 'Natural-language text with colon retained');
 assert_test(!invoke_private('is_translatable', '<div></div>'),
     'Markup-only strings are excluded');
 $visible = invoke_private('public_job', [
@@ -90,4 +94,11 @@ assert_test($job['status'] === 'running' &&
 assert_test(!isset(invoke_private('public_job', $job)['retry_counts']),
     'Job status does not disclose internal per-item retries');
 
+$no_http = ['db_cursor'=>148,'status'=>'running','retry_counts'=>[],'review_items'=>[],'failed'=>0,'strings_skipped'=>0,'last_error'=>''];
+$GLOBALS['settings']['jff_openai_translation_activity'] = ['status'=>'success','code'=>'','time'=>time()];
+$retry_method->invokeArgs(null, [&$no_http,'es_ES',['id'=>149,'original'=>'Unusual data'],[],[],['status'=>0,'translated'=>'']]);
+assert_test($no_http['status']==='waiting' && $no_http['db_cursor']===148,'Silent skip gets bounded retry');
+$no_http['status']='running';
+$retry_method->invokeArgs(null, [&$no_http,'es_ES',['id'=>149,'original'=>'Unusual data'],[],[],['status'=>0,'translated'=>'']]);
+assert_test($no_http['db_cursor']===149 && $no_http['status']==='running' && $no_http['review_items'][0]['reason']==='translatepress_no_api_call','Repeated silent skip continues and reports accurate reason');
 echo "All manager smoke tests passed.\n";
