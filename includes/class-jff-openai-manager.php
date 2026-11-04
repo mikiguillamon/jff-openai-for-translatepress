@@ -16,6 +16,7 @@ final class JFF_TRP_Manager {
     const PAGE_SLUG = 'jff-trp-manager';
     const BATCH_SIZE = 4;
     const STRINGS_PER_TICK = 8;
+    const SCOPE_MODE = 'rendered_urls_v1';
     const MAX_STRING_ATTEMPTS = 2;
     const MAX_REPORTED_ISSUES = 30;
 
@@ -47,6 +48,87 @@ final class JFF_TRP_Manager {
         return array_values(array_filter(array_unique((array) ($settings['translation-languages'] ?? [])), function ($lang) use ($default) {
             return is_string($lang) && $lang !== '' && $lang !== $default && preg_match('/^[A-Za-z]{2,3}(?:_[A-Za-z]{2,4})?$/D', $lang);
         }));
+    }
+
+    /** Restrict the bulk dictionary to strings encountered on signed site crawls. */
+    private static function seen_table_name() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'jff_trp_bulk_seen';
+        if (!preg_match('/^[A-Za-z0-9_]+$/D', $table)) {
+            throw new RuntimeException('Unsafe bulk queue table name.');
+        }
+        return $table;
+    }
+
+    private static function ensure_seen_table() {
+        global $wpdb;
+        $table = self::seen_table_name();
+        $collate = $wpdb->get_charset_collate();
+        $sql = "CREATE TABLE IF NOT EXISTS {$table} (
+            job_id varchar(36) NOT NULL,
+            language varchar(16) NOT NULL,
+            original_hash char(32) NOT NULL,
+            PRIMARY KEY (job_id, language, original_hash)
+        ) {$collate}";
+        if ($wpdb->query($sql) === false ||
+            $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+            throw new RuntimeException('Could not create the scoped translation queue.');
+        }
+        return $table;
+    }
+
+    private static function clear_seen_queue() {
+        global $wpdb;
+        $table = self::ensure_seen_table();
+        if ($wpdb->query("DELETE FROM {$table}") === false) {
+            throw new RuntimeException('Could not initialize the scoped translation queue.');
+        }
+    }
+
+    private static function is_scoped_job($job) {
+        return is_array($job) && ($job['scope_mode'] ?? '') === self::SCOPE_MODE;
+    }
+
+    /**
+     * This callback runs ONLY on a verified, signed discovery page request.
+     * The filter receives actual strings TranslatePress found in rendered HTML,
+     * before it inserts any previously unseen strings into its dictionary.
+     * Store hashes, never source text, and do not change the filter return value.
+     */
+    public static function capture_rendered_strings($dictionary, $query, $strings, $lang, $block_type = null) {
+        global $wpdb;
+        $job = get_option(self::JOB_OPTION, []);
+        if (!self::is_scoped_job($job) || ($job['status'] ?? '') !== 'running' ||
+            ($job['phase'] ?? '') !== 'discover' ||
+            !in_array($lang, (array) ($job['languages'] ?? []), true)) {
+            return $dictionary;
+        }
+        $seen = self::seen_table_name();
+        $values = [];
+        $placeholders = [];
+        foreach ((array) $strings as $original) {
+            if (!is_string($original) || $original === '') {
+                continue;
+            }
+            // The database stores some original values after sanitization.
+            // Track both forms to make joining resilient without translating new content.
+            $variants = [$original];
+            if (function_exists('trp_sanitize_string')) {
+                $variants[] = trp_sanitize_string($original, false);
+            }
+            foreach (array_unique($variants) as $value) {
+                $placeholders[] = '(%s, %s, %s)';
+                array_push($values, $job['id'], $lang, md5($value));
+            }
+        }
+        if ($placeholders) {
+            $sql = "INSERT IGNORE INTO {$seen} (job_id, language, original_hash) VALUES " .
+                implode(', ', $placeholders);
+            if ($wpdb->query($wpdb->prepare($sql, $values)) === false) {
+                throw new RuntimeException('Failed to capture observed page strings.');
+            }
+        }
+        return $dictionary;
     }
 
     private static function require_engine() {
@@ -147,8 +229,10 @@ final class JFF_TRP_Manager {
                 if (!$urls) {
                     throw new RuntimeException('No public URLs were found to translate.');
                 }
+                self::clear_seen_queue();
                 $job = [
                     'id' => wp_generate_uuid4(), 'status' => 'running', 'phase' => 'discover',
+                    'scope_mode' => self::SCOPE_MODE,
                     'languages' => $langs, 'urls' => $urls, 'url_count' => count($urls), 'lang_index' => 0, 'url_index' => 0,
                     'pass' => 0, 'passes' => 2, 'db_cursor' => 0, 'db_scanned' => 0,
                     'urls_done' => 0, 'strings_done' => 0, 'strings_unchanged' => 0,
@@ -168,6 +252,9 @@ final class JFF_TRP_Manager {
                 if ($operation === 'pause' && in_array($existing['status'], ['running', 'waiting'], true)) {
                     $existing['status'] = 'paused';
                 } elseif ($operation === 'resume' && in_array($existing['status'], ['paused', 'waiting'], true)) {
+                    if (!self::is_scoped_job($existing)) {
+                        throw new RuntimeException('This job used unscoped dictionary scanning. Stop it, then start a new scoped job. Existing translations are preserved.');
+                    }
                     self::require_engine();
                     $existing['status'] = 'running';
                     $existing['last_error'] = '';
@@ -390,8 +477,13 @@ final class JFF_TRP_Manager {
         $signature = sanitize_text_field(wp_unslash($_GET['jff_trp_signature']));
         if ($id !== '' && hash_equals($id, $requested) &&
             hash_equals(self::signature($id, 'discover'), $signature) &&
-            ($job['status'] ?? '') === 'running') {
+            ($job['status'] ?? '') === 'running' && self::is_scoped_job($job) &&
+            ($job['phase'] ?? '') === 'discover') {
             add_filter('trp_disable_automatic_translations_due_to_error', '__return_true', PHP_INT_MAX);
+            add_filter('trp_get_existing_translations', [__CLASS__, 'capture_rendered_strings'], 20, 5);
+            if (!headers_sent()) {
+                header('X-JFF-TRP-Discovery: 1');
+            }
             if (!defined('DONOTCACHEPAGE')) {
                 define('DONOTCACHEPAGE', true);
             }
@@ -455,6 +547,13 @@ final class JFF_TRP_Manager {
     public static function run_once($id) {
         $job = get_option(self::JOB_OPTION, []);
         if (!is_array($job) || ($job['id'] ?? '') !== $id) {
+            return;
+        }
+        if (!self::is_scoped_job($job)) {
+            $job['status'] = 'paused';
+            $job['last_error'] = 'This job predates page-scoped translation. Stop it and start a new job; existing translations are preserved.';
+            $job['updated'] = time();
+            update_option(self::JOB_OPTION, $job, false);
             return;
         }
         if (($job['status'] ?? '') === 'waiting') {
@@ -570,6 +669,10 @@ final class JFF_TRP_Manager {
         if (strtolower((string) wp_remote_retrieve_header($response, 'x-litespeed-cache')) === 'hit') {
             throw new RuntimeException('LiteSpeed returned a cached page; discovery cannot be verified. Configure URL cache bypass.');
         }
+        if ($job['phase'] === 'discover' &&
+            (string) wp_remote_retrieve_header($response, 'x-jff-trp-discovery') !== '1') {
+            throw new RuntimeException('Discovery page did not activate string capture; check page cache and server headers.');
+        }
         $job['url_index']++;
         $job['urls_done']++;
     }
@@ -594,9 +697,15 @@ final class JFF_TRP_Manager {
         $render = $trp->get_component('translation_render');
         $engine = $trp->get_component('machine_translator');
         list($table) = self::table_names($lang);
+        $seen = self::seen_table_name();
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT id, original FROM `{$table}` WHERE status = 0 AND id > %d ORDER BY id ASC LIMIT 160",
-            (int) $job['db_cursor']
+            "SELECT d.id, d.original FROM `{$table}` AS d
+             INNER JOIN `{$seen}` AS q
+               ON q.job_id = %s AND q.language = %s
+               AND q.original_hash = MD5(d.original)
+             WHERE d.status = 0 AND d.id > %d
+             ORDER BY d.id ASC LIMIT 160",
+            $job['id'], $lang, (int) $job['db_cursor']
         ), ARRAY_A);
         if (!is_array($rows)) {
             throw new RuntimeException('Unable to fetch pending dictionary strings.');
