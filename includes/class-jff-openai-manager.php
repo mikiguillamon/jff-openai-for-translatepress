@@ -580,7 +580,8 @@ final class JFF_TRP_Manager {
         }
         $visible = trim(html_entity_decode(strip_tags($original), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
         if ($visible === '' || filter_var($visible, FILTER_VALIDATE_URL) !== false ||
-            preg_match('~^(?:https?://|www\.)~i', $visible)) {
+            preg_match('~^(?:https?://|www\.)~i', $visible) ||
+            preg_match('~^[A-Za-z][A-Za-z0-9+.-]{1,24}:\S+$~D', $visible)) {
             return false;
         }
         return preg_match('/\p{L}{2}/u', $visible) === 1;
@@ -710,18 +711,13 @@ final class JFF_TRP_Manager {
                         throw new RuntimeException('Dictionary database error in ' . $lang .
                             ' at ID ' . $item['id'] . '. Inspect TranslatePress SQL error logs.');
                     }
-                    if (!$new_http && !$result) {
-                        throw new RuntimeException('TranslatePress skipped ' . $lang . ' dictionary ID ' .
-                            $item['id'] . ' before calling OpenAI (no HTTP request). Check quota, filters and server logs.');
-                    }
+                    // Silent skips are per-item problems; the job must continue.
                     self::record_unstored_item($job, $lang, $item, $new_http, $result,
                         $first_missing['stored']);
                     // Stop worker; retry in a fresh request, not a third API batch.
                     break;
                 }
-                if (!$new_http && !$result) {
-                    throw new RuntimeException('TranslatePress skipped a translation batch before calling OpenAI.');
-                }
+                // If rows are already stored, no additional HTTP request is required.
             }
         } finally {
             remove_action('http_api_debug', $watcher, 10);
@@ -738,12 +734,15 @@ final class JFF_TRP_Manager {
         $key = $lang . ':' . $id;
         $attempt = 1 + (int) ($job['retry_counts'][$key] ?? 0);
         $job['retry_counts'][$key] = $attempt;
-        $last = get_option('jff_openai_translation_activity', []);
-        $code = 'unknown';
-        $state = 'unknown';
-        if (is_array($last) && !empty($last['time']) && time() - (int) $last['time'] <= 120) {
-            $code = preg_replace('/[^a-zA-Z0-9_]/', '', (string) ($last['code'] ?? '')) ?: 'none';
-            $state = preg_replace('/[^a-zA-Z0-9_]/', '', (string) ($last['status'] ?? '')) ?: 'unknown';
+        $silent_skip = !$http && !$result;
+        $code = $silent_skip ? 'translatepress_no_api_call' : 'unknown';
+        $state = $silent_skip ? 'skipped' : 'unknown';
+        if (!$silent_skip) {
+            $last = get_option('jff_openai_translation_activity', []);
+            if (is_array($last) && !empty($last['time']) && time() - (int) $last['time'] <= 120) {
+                $code = preg_replace('/[^a-zA-Z0-9_]/', '', (string) ($last['code'] ?? '')) ?: 'none';
+                $state = preg_replace('/[^a-zA-Z0-9_]/', '', (string) ($last['status'] ?? '')) ?: 'unknown';
+            }
         }
         $http_label = $http ? implode(',', array_map('strval', $http)) : 'none';
         $stored_status = is_array($stored) ? (int) ($stored['status'] ?? -1) : -1;
